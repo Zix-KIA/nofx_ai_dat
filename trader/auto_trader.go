@@ -396,14 +396,250 @@ func (at *AutoTrader) watchScreenerSignals() {
 				continue
 			}
 
-			// 通过所有过滤条件，添加到候选列表
+			// 通过所有过滤条件
+
+			// 检查是否已在watchlist中
+			if at.isInWatchlist(event.Pair) {
+				// 已在watchlist，更新screener数据并提高优先级
+				log.Printf("   📝 [%s] %s 已在Watchlist中，更新数据", at.name, event.Pair)
+				at.updateWatchlistWithNewSignal(event)
+				continue
+			}
+
+			// 添加到候选列表（用于getCandidateCoins合并）
 			at.screenerCandidatesMux.Lock()
 			at.screenerCandidates[event.Pair] = true
 			at.screenerCandidatesMux.Unlock()
 
-			log.Printf("   ✅ [%s] 已添加 %s 到候选币种列表", at.name, event.Pair)
+			// 🔥 实时AI分析（在独立goroutine中执行，避免阻塞信号通道）
+			go at.analyzeNewSignalRealtime(event)
+
+			log.Printf("   ✅ [%s] 已添加 %s 到候选币种列表并触发实时分析", at.name, event.Pair)
 		}
 	}
+}
+
+// updateWatchlistWithNewSignal 更新watchlist中的币种（收到新screener信号时）
+func (at *AutoTrader) updateWatchlistWithNewSignal(event *pool.ScreenerSignalEvent) {
+	at.watchlistMux.Lock()
+	defer at.watchlistMux.Unlock()
+
+	entry, exists := at.watchlist[event.Pair]
+	if !exists {
+		return
+	}
+
+	// 更新screener数据
+	entry.ScreenerTotalSignals = event.Statistics.TotalSignals
+	entry.ScreenerSCCount = event.Statistics.SCCount
+	entry.ScreenerBTCCorr = event.Statistics.BTCCorrAvg
+	entry.ScreenerSCColor = event.Statistics.SCLastColor
+	entry.LastAnalyzedAt = time.Now()
+
+	// 提升优先级（最高到10）
+	if entry.Priority < 10 {
+		entry.Priority++
+		log.Printf("   ⬆️  优先级提升: %s %d -> %d", event.Pair, entry.Priority-1, entry.Priority)
+	}
+}
+
+// analyzeNewSignalRealtime 实时分析新的screener信号（在独立goroutine中运行）
+func (at *AutoTrader) analyzeNewSignalRealtime(event *pool.ScreenerSignalEvent) {
+	log.Printf("\n" + strings.Repeat("=", 70))
+	log.Printf("🔥 [%s] 实时分析新信号: %s", at.name, event.Pair)
+	log.Println(strings.Repeat("=", 70))
+
+	// 检查当前持仓数量
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		log.Printf("   ❌ 获取持仓失败: %v", err)
+		return
+	}
+
+	activePositionCount := 0
+	for _, pos := range positions {
+		if quantity, ok := pos["positionAmt"].(float64); ok && quantity != 0 {
+			activePositionCount++
+		}
+	}
+
+	// 如果已达最大持仓数，添加到watchlist
+	if activePositionCount >= at.maxPositions {
+		log.Printf("   📝 持仓已满(%d/%d)，添加到Watchlist", activePositionCount, at.maxPositions)
+
+		screenerData := &decision.ScreenerData{
+			TotalSignals:  event.Statistics.TotalSignals,
+			SCCount:       event.Statistics.SCCount,
+			TSBinance:     event.Statistics.TSBinanceCount,
+			TSBybit:       event.Statistics.TSBybitCount,
+			BTCCorr:       event.Statistics.BTCCorrAvg,
+			SCColor:       event.Statistics.SCLastColor,
+			LastSignalAge: 0, // 刚收到信号
+		}
+
+		err := at.addToWatchlist(
+			event.Pair,
+			fmt.Sprintf("Screener信号: %d总信号, SC颜色%s, BTC相关性%.2f",
+				event.Statistics.TotalSignals, event.Statistics.SCLastColor, event.Statistics.BTCCorrAvg),
+			7, // 默认优先级7（较高）
+			[]string{"screener"},
+			screenerData,
+		)
+		if err != nil {
+			log.Printf("   ❌ 添加到Watchlist失败: %v", err)
+		}
+		return
+	}
+
+	// 构建分析上下文（只包含这个币种）
+	ctx, err := at.buildSingleCoinAnalysisContext(event.Pair, event.Statistics)
+	if err != nil {
+		log.Printf("   ❌ 构建分析上下文失败: %v", err)
+		return
+	}
+
+	// 调用AI分析
+	log.Printf("   🤖 请求AI分析...")
+	fullDecision, err := decision.GetFullDecisionWithCustomPrompt(ctx, at.mcpClient, at.customPrompt, at.overrideBasePrompt, at.systemPromptTemplate)
+	if err != nil {
+		log.Printf("   ❌ AI分析失败: %v", err)
+		return
+	}
+
+	// 处理AI决策
+	if fullDecision == nil || len(fullDecision.Decisions) == 0 {
+		log.Printf("   ⏸  AI决定: 暂不行动")
+		return
+	}
+
+	for _, d := range fullDecision.Decisions {
+		if d.Symbol != event.Pair {
+			continue
+		}
+
+		log.Printf("   🤖 AI决策: %s - %s", d.Action, d.Reasoning)
+
+		switch d.Action {
+		case "open_long", "open_short":
+			// AI决定立即开仓
+			log.Printf("   ✅ 条件成熟，立即开仓")
+
+			actionRecord := &logger.DecisionAction{
+				Symbol:    d.Symbol,
+				Action:    d.Action,
+				Reasoning: d.Reasoning,
+			}
+
+			err := at.executeDecisionWithRecord(&d, actionRecord)
+			if err != nil {
+				log.Printf("   ❌ 开仓失败: %v", err)
+			} else {
+				// 开仓成功，从候选列表移除
+				at.screenerCandidatesMux.Lock()
+				delete(at.screenerCandidates, event.Pair)
+				at.screenerCandidatesMux.Unlock()
+			}
+
+		case "add_to_watchlist":
+			// AI决定添加到watchlist观察
+			screenerData := &decision.ScreenerData{
+				TotalSignals:  event.Statistics.TotalSignals,
+				SCCount:       event.Statistics.SCCount,
+				TSBinance:     event.Statistics.TSBinanceCount,
+				TSBybit:       event.Statistics.TSBybitCount,
+				BTCCorr:       event.Statistics.BTCCorrAvg,
+				SCColor:       event.Statistics.SCLastColor,
+				LastSignalAge: 0,
+			}
+
+			priority := d.Priority
+			if priority <= 0 {
+				priority = 5
+			}
+
+			err := at.addToWatchlist(event.Pair, d.Reasoning, priority, []string{"screener"}, screenerData)
+			if err != nil {
+				log.Printf("   ❌ 添加到Watchlist失败: %v", err)
+			}
+
+		case "wait", "hold":
+			log.Printf("   ⏸  暂不行动，继续观察")
+
+		default:
+			log.Printf("   ⚠️  未知操作: %s", d.Action)
+		}
+	}
+
+	log.Printf(strings.Repeat("=", 70) + "\n")
+}
+
+// buildSingleCoinAnalysisContext 为单个币种构建分析上下文（用于实时分析）
+func (at *AutoTrader) buildSingleCoinAnalysisContext(symbol string, stats *pool.PairStatistics) (*decision.Context, error) {
+	// 获取账户信息
+	balance, err := at.trader.GetBalance()
+	if err != nil {
+		return nil, fmt.Errorf("获取账户余额失败: %w", err)
+	}
+
+	totalWalletBalance := 0.0
+	totalUnrealizedProfit := 0.0
+	availableBalance := 0.0
+
+	if wallet, ok := balance["totalWalletBalance"].(float64); ok {
+		totalWalletBalance = wallet
+	}
+	if unrealized, ok := balance["totalUnrealizedProfit"].(float64); ok {
+		totalUnrealizedProfit = unrealized
+	}
+	if avail, ok := balance["availableBalance"].(float64); ok {
+		availableBalance = avail
+	}
+
+	totalEquity := totalWalletBalance + totalUnrealizedProfit
+
+	// 创建候选币种列表（只包含这一个币种）
+	candidateCoins := []decision.CandidateCoin{
+		{
+			Symbol:  symbol,
+			Sources: []string{"screener"},
+		},
+	}
+
+	// 创建Screener数据映射
+	screenerDataMap := make(map[string]*decision.ScreenerData)
+	screenerDataMap[symbol] = &decision.ScreenerData{
+		TotalSignals:  stats.TotalSignals,
+		SCCount:       stats.SCCount,
+		TSBinance:     stats.TSBinanceCount,
+		TSBybit:       stats.TSBybitCount,
+		BTCCorr:       stats.BTCCorrAvg,
+		SCColor:       stats.SCLastColor,
+		LastSignalAge: 0, // 刚收到信号
+	}
+
+	// 构建上下文
+	ctx := &decision.Context{
+		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
+		CallCount:        at.callCount,
+		BTCETHLeverage:   at.config.BTCETHLeverage,
+		AltcoinLeverage:  at.config.AltcoinLeverage,
+		Account: decision.AccountInfo{
+			TotalEquity:      totalEquity,
+			AvailableBalance: availableBalance,
+			PositionCount:    0, // 实时分析时不关心持仓数
+		},
+		Positions:       []decision.PositionInfo{}, // 空持仓列表
+		CandidateCoins:  candidateCoins,
+		ScreenerDataMap: screenerDataMap,
+	}
+
+	// 获取市场数据
+	if err := decision.FetchMarketDataForContext(ctx); err != nil {
+		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	return ctx, nil
 }
 
 // autoSyncBalanceIfNeeded 自动同步余额（每10分钟检查一次，变化>5%才更新）
