@@ -1054,15 +1054,21 @@ func (s *Server) handleGetUserSignalSource(c *gin.Context) {
 	if err != nil {
 		// 如果配置不存在，返回空配置而不是404错误
 		c.JSON(http.StatusOK, gin.H{
-			"coin_pool_url": "",
-			"oi_top_url":    "",
+			"coin_pool_url":     "",
+			"oi_top_url":        "",
+			"screener_enabled":  false,
+			"supabase_url":      "",
+			"supabase_key":      "",
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"coin_pool_url": source.CoinPoolURL,
-		"oi_top_url":    source.OITopURL,
+		"coin_pool_url":     source.CoinPoolURL,
+		"oi_top_url":        source.OITopURL,
+		"screener_enabled":  source.ScreenerEnabled,
+		"supabase_url":      source.SupabaseURL,
+		"supabase_key":      source.SupabaseKey,
 	})
 }
 
@@ -1070,8 +1076,11 @@ func (s *Server) handleGetUserSignalSource(c *gin.Context) {
 func (s *Server) handleSaveUserSignalSource(c *gin.Context) {
 	userID := c.GetString("user_id")
 	var req struct {
-		CoinPoolURL string `json:"coin_pool_url"`
-		OITopURL    string `json:"oi_top_url"`
+		CoinPoolURL     string `json:"coin_pool_url"`
+		OITopURL        string `json:"oi_top_url"`
+		ScreenerEnabled bool   `json:"screener_enabled"`
+		SupabaseURL     string `json:"supabase_url"`
+		SupabaseKey     string `json:"supabase_key"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1079,13 +1088,22 @@ func (s *Server) handleSaveUserSignalSource(c *gin.Context) {
 		return
 	}
 
+	// 保存基础配置
 	err := s.database.CreateUserSignalSource(userID, req.CoinPoolURL, req.OITopURL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存用户信号源配置失败: %v", err)})
 		return
 	}
 
-	log.Printf("✓ 用户信号源配置已保存: user=%s, coin_pool=%s, oi_top=%s", userID, req.CoinPoolURL, req.OITopURL)
+	// 保存screener配置
+	err = s.database.UpdateUserSignalSourceScreener(userID, req.ScreenerEnabled, req.SupabaseURL, req.SupabaseKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存screener配置失败: %v", err)})
+		return
+	}
+
+	log.Printf("✓ 用户信号源配置已保存: user=%s, coin_pool=%s, oi_top=%s, screener=%v",
+		userID, req.CoinPoolURL, req.OITopURL, req.ScreenerEnabled)
 	c.JSON(http.StatusOK, gin.H{"message": "用户信号源配置已保存"})
 }
 

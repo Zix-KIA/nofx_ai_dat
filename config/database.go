@@ -83,6 +83,9 @@ func (d *Database) createTables() error {
 			user_id TEXT NOT NULL,
 			coin_pool_url TEXT DEFAULT '',
 			oi_top_url TEXT DEFAULT '',
+			screener_enabled BOOLEAN DEFAULT 0,
+			supabase_url TEXT DEFAULT '',
+			supabase_key TEXT DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -104,6 +107,7 @@ func (d *Database) createTables() error {
 			trading_symbols TEXT DEFAULT '',
 			use_coin_pool BOOLEAN DEFAULT 0,
 			use_oi_top BOOLEAN DEFAULT 0,
+			use_screener_signals BOOLEAN DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -201,6 +205,10 @@ func (d *Database) createTables() error {
 		`ALTER TABLE traders ADD COLUMN system_prompt_template TEXT DEFAULT 'default'`, // 系统提示词模板名称
 		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,              // 自定义API地址
 		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,           // 自定义模型名称
+		`ALTER TABLE user_signal_sources ADD COLUMN screener_enabled BOOLEAN DEFAULT 0`, // 是否启用实时screener信号
+		`ALTER TABLE user_signal_sources ADD COLUMN supabase_url TEXT DEFAULT ''`,      // Supabase PostgreSQL连接URL
+		`ALTER TABLE user_signal_sources ADD COLUMN supabase_key TEXT DEFAULT ''`,      // Supabase API Key
+		`ALTER TABLE traders ADD COLUMN use_screener_signals BOOLEAN DEFAULT 0`,        // 是否使用实时screener信号
 	}
 
 	for _, query := range alterQueries {
@@ -436,12 +444,15 @@ type TraderRecord struct {
 
 // UserSignalSource 用户信号源配置
 type UserSignalSource struct {
-	ID          int       `json:"id"`
-	UserID      string    `json:"user_id"`
-	CoinPoolURL string    `json:"coin_pool_url"`
-	OITopURL    string    `json:"oi_top_url"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID              int       `json:"id"`
+	UserID          string    `json:"user_id"`
+	CoinPoolURL     string    `json:"coin_pool_url"`
+	OITopURL        string    `json:"oi_top_url"`
+	ScreenerEnabled bool      `json:"screener_enabled"`
+	SupabaseURL     string    `json:"supabase_url"`
+	SupabaseKey     string    `json:"supabase_key"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // GenerateOTPSecret 生成OTP密钥
@@ -956,14 +967,29 @@ func (d *Database) CreateUserSignalSource(userID, coinPoolURL, oiTopURL string) 
 	return err
 }
 
+// UpdateUserSignalSourceScreener 更新用户screener配置
+func (d *Database) UpdateUserSignalSourceScreener(userID string, screenerEnabled bool, supabaseURL, supabaseKey string) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO user_signal_sources (user_id, screener_enabled, supabase_url, supabase_key, updated_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(user_id) DO UPDATE SET
+			screener_enabled = excluded.screener_enabled,
+			supabase_url = excluded.supabase_url,
+			supabase_key = excluded.supabase_key,
+			updated_at = CURRENT_TIMESTAMP
+	`, userID, screenerEnabled, supabaseURL, supabaseKey)
+	return err
+}
+
 // GetUserSignalSource 获取用户信号源配置
 func (d *Database) GetUserSignalSource(userID string) (*UserSignalSource, error) {
 	var source UserSignalSource
 	err := d.db.QueryRow(`
-		SELECT id, user_id, coin_pool_url, oi_top_url, created_at, updated_at
+		SELECT id, user_id, coin_pool_url, oi_top_url, screener_enabled, supabase_url, supabase_key, created_at, updated_at
 		FROM user_signal_sources WHERE user_id = ?
 	`, userID).Scan(
 		&source.ID, &source.UserID, &source.CoinPoolURL, &source.OITopURL,
+		&source.ScreenerEnabled, &source.SupabaseURL, &source.SupabaseKey,
 		&source.CreatedAt, &source.UpdatedAt,
 	)
 	if err != nil {
