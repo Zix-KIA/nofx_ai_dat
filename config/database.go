@@ -100,7 +100,7 @@ func (d *Database) createTables() error {
 			ai_model_id TEXT NOT NULL,
 			exchange_id TEXT NOT NULL,
 			initial_balance REAL NOT NULL,
-			scan_interval_minutes INTEGER DEFAULT 3,
+			scan_interval_minutes REAL DEFAULT 0.5,
 			is_running BOOLEAN DEFAULT 0,
 			btc_eth_leverage INTEGER DEFAULT 5,
 			altcoin_leverage INTEGER DEFAULT 5,
@@ -427,7 +427,7 @@ type TraderRecord struct {
 	AIModelID            string    `json:"ai_model_id"`
 	ExchangeID           string    `json:"exchange_id"`
 	InitialBalance       float64   `json:"initial_balance"`
-	ScanIntervalMinutes  int       `json:"scan_interval_minutes"`
+	ScanIntervalMinutes  float64   `json:"scan_interval_minutes"`
 	IsRunning            bool      `json:"is_running"`
 	BTCETHLeverage       int       `json:"btc_eth_leverage"`       // BTC/ETH杠杆倍数
 	AltcoinLeverage      int       `json:"altcoin_leverage"`       // 山寨币杠杆倍数
