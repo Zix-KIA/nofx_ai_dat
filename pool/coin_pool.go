@@ -3,7 +3,7 @@ package pool
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -158,7 +158,7 @@ func fetchCoinPool() ([]CoinInfo, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -210,7 +210,7 @@ func saveCoinPoolCache(coins []CoinInfo) error {
 	}
 
 	cachePath := filepath.Join(coinPoolConfig.CacheDir, "latest.json")
-	if err := ioutil.WriteFile(cachePath, data, 0644); err != nil {
+	if err := os.WriteFile(cachePath, data, 0644); err != nil {
 		return fmt.Errorf("写入缓存文件失败: %w", err)
 	}
 
@@ -227,7 +227,7 @@ func loadCoinPoolCache() ([]CoinInfo, error) {
 		return nil, fmt.Errorf("缓存文件不存在")
 	}
 
-	data, err := ioutil.ReadFile(cachePath)
+	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("读取缓存文件失败: %w", err)
 	}
@@ -479,7 +479,7 @@ func fetchOITop() ([]OIPosition, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取OI Top响应失败: %w", err)
 	}
@@ -525,7 +525,7 @@ func saveOITopCache(positions []OIPosition) error {
 	}
 
 	cachePath := filepath.Join(oiTopConfig.CacheDir, "oi_top_latest.json")
-	if err := ioutil.WriteFile(cachePath, data, 0644); err != nil {
+	if err := os.WriteFile(cachePath, data, 0644); err != nil {
 		return fmt.Errorf("写入OI Top缓存文件失败: %w", err)
 	}
 
@@ -541,7 +541,7 @@ func loadOITopCache() ([]OIPosition, error) {
 		return nil, fmt.Errorf("OI Top缓存文件不存在")
 	}
 
-	data, err := ioutil.ReadFile(cachePath)
+	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("读取OI Top缓存文件失败: %w", err)
 	}
