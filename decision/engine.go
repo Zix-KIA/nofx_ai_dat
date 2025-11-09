@@ -95,7 +95,7 @@ type Context struct {
 // Decision AI的交易决策
 type Decision struct {
 	Symbol string `json:"symbol"`
-	Action string `json:"action"` // "open_long", "open_short", "close_long", "close_short", "update_stop_loss", "update_take_profit", "partial_close", "hold", "wait"
+	Action string `json:"action"` // "open_long", "open_short", "close_long", "close_short", "update_stop_loss", "update_take_profit", "partial_close", "add_to_watchlist", "remove_from_watchlist", "hold", "wait"
 
 	// 开仓参数
 	Leverage        int     `json:"leverage,omitempty"`
@@ -107,6 +107,9 @@ type Decision struct {
 	NewStopLoss     float64 `json:"new_stop_loss,omitempty"`    // 用于 update_stop_loss
 	NewTakeProfit   float64 `json:"new_take_profit,omitempty"`  // 用于 update_take_profit
 	ClosePercentage float64 `json:"close_percentage,omitempty"` // 用于 partial_close (0-100)
+
+	// Watchlist参数（新增）
+	Priority int `json:"priority,omitempty"` // 用于 add_to_watchlist (1-10, 10最高)
 
 	// 通用参数
 	Confidence int     `json:"confidence,omitempty"` // 信心度 (0-100)
@@ -158,6 +161,11 @@ func GetFullDecisionWithCustomPrompt(ctx *Context, mcpClient *mcp.Client, custom
 }
 
 // fetchMarketDataForContext 为上下文中的所有币种获取市场数据和OI数据
+// FetchMarketDataForContext 为上下文中的所有币种获取市场数据（导出版本）
+func FetchMarketDataForContext(ctx *Context) error {
+	return fetchMarketDataForContext(ctx)
+}
+
 func fetchMarketDataForContext(ctx *Context) error {
 	ctx.MarketDataMap = make(map[string]*market.Data)
 	ctx.OITopDataMap = make(map[string]*OITopData)

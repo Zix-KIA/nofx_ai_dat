@@ -10,6 +10,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,22 @@ type AutoTraderConfig struct {
 	UseScreenerSignals bool // 是否使用screener实时信号
 }
 
+// WatchlistEntry 监控列表条目
+type WatchlistEntry struct {
+	Symbol         string    // 交易对符号
+	AddedAt        time.Time // 添加时间
+	Reason         string    // 添加原因（AI推理）
+	LastAnalyzedAt time.Time // 最后分析时间
+	Priority       int       // 优先级 (1-10, 10最高)
+	Sources        []string  // 来源 (screener, ai500, oi_top等)
+
+	// Screener相关数据（如果来自screener）
+	ScreenerTotalSignals int     // 总信号数
+	ScreenerSCCount      int     // SC信号数
+	ScreenerBTCCorr      float64 // BTC相关性
+	ScreenerSCColor      string  // SC颜色
+}
+
 // AutoTrader 自动交易器
 type AutoTrader struct {
 	id                    string // Trader唯一标识
@@ -115,6 +132,12 @@ type AutoTrader struct {
 	useScreenerSignals    bool               // 是否使用screener信号
 	screenerCandidates    map[string]bool    // 来自screener的候选币种
 	screenerCandidatesMux sync.RWMutex       // 候选币种的读写锁
+
+	// Watchlist相关
+	watchlist             map[string]*WatchlistEntry // 监控列表 (symbol -> entry)
+	watchlistMux          sync.RWMutex               // 监控列表读写锁
+	maxWatchlistSize      int                        // 最大监控列表大小 (默认50)
+	maxPositions          int                        // 最大持仓数量 (默认10)
 }
 
 // NewAutoTrader 创建自动交易器
@@ -216,6 +239,13 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		systemPromptTemplate = "adaptive"
 	}
 
+	// 设置默认限制
+	maxWatchlistSize := 50 // 默认最大watchlist大小
+	maxPositions := 10     // 默认最大持仓数量
+	if config.MaxPositions > 0 {
+		maxPositions = config.MaxPositions
+	}
+
 	return &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
@@ -243,6 +273,11 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		userID:                userID,
 		useScreenerSignals:    config.UseScreenerSignals,
 		screenerCandidates:    make(map[string]bool),
+		// Watchlist初始化
+		watchlist:        make(map[string]*WatchlistEntry),
+		watchlistMux:     sync.RWMutex{},
+		maxWatchlistSize: maxWatchlistSize,
+		maxPositions:     maxPositions,
 	}, nil
 }
 
@@ -260,6 +295,10 @@ func (at *AutoTrader) Run() error {
 		go at.watchScreenerSignals()
 		log.Printf("👂 [%s] Screener信号监听已启动", at.name)
 	}
+
+	// 启动watchlist监控
+	at.monitorWg.Add(1)
+	go at.watchlistMonitor()
 
 	// 启动回撤监控
 	at.startDrawdownMonitor()
@@ -855,6 +894,10 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 		return at.executeUpdateTakeProfitWithRecord(decision, actionRecord)
 	case "partial_close":
 		return at.executePartialCloseWithRecord(decision, actionRecord)
+	case "add_to_watchlist":
+		return at.executeAddToWatchlistWithRecord(decision, actionRecord)
+	case "remove_from_watchlist":
+		return at.executeRemoveFromWatchlistWithRecord(decision, actionRecord)
 	case "hold", "wait":
 		// 无需执行，仅记录
 		return nil
@@ -1310,6 +1353,60 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 	remainingQuantity := totalQuantity - closeQuantity
 	log.Printf("  ✓ 部分平仓成功: 平仓 %.4f (%.1f%%), 剩余 %.4f",
 		closeQuantity, decision.ClosePercentage, remainingQuantity)
+
+	return nil
+}
+
+// executeAddToWatchlistWithRecord 添加到监控列表并记录
+func (at *AutoTrader) executeAddToWatchlistWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📝 添加到Watchlist: %s (优先级:%d)", decision.Symbol, decision.Priority)
+
+	// 默认优先级为5
+	priority := decision.Priority
+	if priority <= 0 {
+		priority = 5
+	}
+	if priority > 10 {
+		priority = 10
+	}
+
+	// 获取币种来源
+	sources := []string{"ai_decision"}
+
+	// 获取screener数据（如果有）
+	var screenerData *decision.ScreenerData
+	listener := pool.GetGlobalScreenerListener()
+	if listener != nil {
+		if stats, ok := listener.GetStatistics(decision.Symbol); ok {
+			lastSignalAge := int(time.Since(stats.LastSignalDatetime).Minutes())
+			screenerData = &decision.ScreenerData{
+				TotalSignals:  stats.TotalSignals,
+				SCCount:       stats.SCCount,
+				TSBinance:     stats.TSBinanceCount,
+				TSBybit:       stats.TSBybitCount,
+				BTCCorr:       stats.BTCCorrAvg,
+				SCColor:       stats.SCLastColor,
+				LastSignalAge: lastSignalAge,
+			}
+			sources = append(sources, "screener")
+		}
+	}
+
+	// 添加到watchlist
+	err := at.addToWatchlist(decision.Symbol, decision.Reasoning, priority, sources, screenerData)
+	if err != nil {
+		return fmt.Errorf("添加到Watchlist失败: %w", err)
+	}
+
+	return nil
+}
+
+// executeRemoveFromWatchlistWithRecord 从监控列表移除并记录
+func (at *AutoTrader) executeRemoveFromWatchlistWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📝 从Watchlist移除: %s", decision.Symbol)
+
+	// 从watchlist移除
+	at.removeFromWatchlist(decision.Symbol, decision.Reasoning)
 
 	return nil
 }
@@ -1819,4 +1916,341 @@ func (at *AutoTrader) ClearPeakPnLCache(symbol string) {
 	defer at.peakPnLCacheMutex.Unlock()
 
 	delete(at.peakPnLCache, symbol)
+}
+
+// ============= Watchlist管理方法 =============
+
+// addToWatchlist 添加币种到监控列表
+func (at *AutoTrader) addToWatchlist(symbol string, reason string, priority int, sources []string, screenerData *decision.ScreenerData) error {
+	at.watchlistMux.Lock()
+	defer at.watchlistMux.Unlock()
+
+	// 检查是否已在watchlist中
+	if _, exists := at.watchlist[symbol]; exists {
+		log.Printf("📝 [%s] %s 已在Watchlist中，更新优先级 %d -> %d", at.name, symbol, at.watchlist[symbol].Priority, priority)
+		// 更新现有条目
+		at.watchlist[symbol].Priority = priority
+		at.watchlist[symbol].Reason = reason
+		at.watchlist[symbol].LastAnalyzedAt = time.Now()
+		return nil
+	}
+
+	// 检查watchlist大小限制
+	if len(at.watchlist) >= at.maxWatchlistSize {
+		// 移除最低优先级的条目
+		var lowestPrioritySymbol string
+		lowestPriority := 11 // 最高优先级是10
+		for sym, entry := range at.watchlist {
+			if entry.Priority < lowestPriority {
+				lowestPriority = entry.Priority
+				lowestPrioritySymbol = sym
+			}
+		}
+		if lowestPrioritySymbol != "" && priority > lowestPriority {
+			log.Printf("⚠️  [%s] Watchlist已满(%d)，移除低优先级币种: %s (优先级%d)",
+				at.name, at.maxWatchlistSize, lowestPrioritySymbol, lowestPriority)
+			delete(at.watchlist, lowestPrioritySymbol)
+		} else {
+			return fmt.Errorf("watchlist已满且新币种优先级不足")
+		}
+	}
+
+	// 创建新条目
+	entry := &WatchlistEntry{
+		Symbol:         symbol,
+		AddedAt:        time.Now(),
+		Reason:         reason,
+		LastAnalyzedAt: time.Now(),
+		Priority:       priority,
+		Sources:        sources,
+	}
+
+	// 如果有screener数据，填充
+	if screenerData != nil {
+		entry.ScreenerTotalSignals = screenerData.TotalSignals
+		entry.ScreenerSCCount = screenerData.SCCount
+		entry.ScreenerBTCCorr = screenerData.BTCCorr
+		entry.ScreenerSCColor = screenerData.SCColor
+	}
+
+	at.watchlist[symbol] = entry
+	log.Printf("➕ [%s] 添加到Watchlist: %s (优先级:%d) - %s", at.name, symbol, priority, reason)
+
+	return nil
+}
+
+// removeFromWatchlist 从监控列表移除币种
+func (at *AutoTrader) removeFromWatchlist(symbol string, reason string) {
+	at.watchlistMux.Lock()
+	defer at.watchlistMux.Unlock()
+
+	if _, exists := at.watchlist[symbol]; exists {
+		delete(at.watchlist, symbol)
+		log.Printf("➖ [%s] 从Watchlist移除: %s - %s", at.name, symbol, reason)
+	}
+}
+
+// isInWatchlist 检查币种是否在监控列表中
+func (at *AutoTrader) isInWatchlist(symbol string) bool {
+	at.watchlistMux.RLock()
+	defer at.watchlistMux.RUnlock()
+	_, exists := at.watchlist[symbol]
+	return exists
+}
+
+// getWatchlistCount 获取监控列表大小
+func (at *AutoTrader) getWatchlistCount() int {
+	at.watchlistMux.RLock()
+	defer at.watchlistMux.RUnlock()
+	return len(at.watchlist)
+}
+
+// getWatchlistEntries 获取所有监控列表条目（按优先级排序）
+func (at *AutoTrader) getWatchlistEntries() []*WatchlistEntry {
+	at.watchlistMux.RLock()
+	defer at.watchlistMux.RUnlock()
+
+	entries := make([]*WatchlistEntry, 0, len(at.watchlist))
+	for _, entry := range at.watchlist {
+		// 创建副本避免并发问题
+		entryCopy := *entry
+		entries = append(entries, &entryCopy)
+	}
+
+	// 按优先级排序（从高到低）
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Priority > entries[j].Priority
+	})
+
+	return entries
+}
+
+// updateWatchlistLastAnalyzed 更新watchlist条目的最后分析时间
+func (at *AutoTrader) updateWatchlistLastAnalyzed(symbol string) {
+	at.watchlistMux.Lock()
+	defer at.watchlistMux.Unlock()
+
+	if entry, exists := at.watchlist[symbol]; exists {
+		entry.LastAnalyzedAt = time.Now()
+	}
+}
+
+// watchlistMonitor 监控watchlist中的币种（每分钟检查一次）
+func (at *AutoTrader) watchlistMonitor() {
+	defer at.monitorWg.Done()
+
+	ticker := time.NewTicker(60 * time.Second) // 每分钟检查一次
+	defer ticker.Stop()
+
+	log.Printf("👀 [%s] Watchlist监控已启动（每分钟检查）", at.name)
+
+	for {
+		select {
+		case <-at.stopMonitorCh:
+			log.Printf("⏹  [%s] Watchlist监控已停止", at.name)
+			return
+
+		case <-ticker.C:
+			at.analyzeWatchlist()
+		}
+	}
+}
+
+// analyzeWatchlist 分析watchlist中的所有币种
+func (at *AutoTrader) analyzeWatchlist() {
+	entries := at.getWatchlistEntries()
+	if len(entries) == 0 {
+		return
+	}
+
+	log.Printf("\n" + strings.Repeat("=", 70))
+	log.Printf("👀 [%s] 分析Watchlist币种 (%d个)", at.name, len(entries))
+	log.Println(strings.Repeat("=", 70))
+
+	// 获取当前持仓数量
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		log.Printf("❌ 获取持仓失败: %v", err)
+		return
+	}
+
+	activePositionCount := 0
+	for _, pos := range positions {
+		if quantity, ok := pos["positionAmt"].(float64); ok && quantity != 0 {
+			activePositionCount++
+		}
+	}
+
+	// 检查是否还能开新仓
+	canOpenNew := activePositionCount < at.maxPositions
+	if !canOpenNew {
+		log.Printf("⚠️  [%s] 已达最大持仓数(%d/%d)，暂不分析Watchlist",
+			at.name, activePositionCount, at.maxPositions)
+		return
+	}
+
+	availableSlots := at.maxPositions - activePositionCount
+	log.Printf("📊 当前持仓: %d/%d | 可开新仓: %d个", activePositionCount, at.maxPositions, availableSlots)
+
+	// 按优先级分析watchlist（从高到低）
+	analyzedCount := 0
+	for _, entry := range entries {
+		// 更新最后分析时间
+		at.updateWatchlistLastAnalyzed(entry.Symbol)
+
+		log.Printf("\n🔍 分析 %s (优先级:%d, 来源:%v)",
+			entry.Symbol, entry.Priority, entry.Sources)
+		log.Printf("   添加原因: %s", entry.Reason)
+		log.Printf("   添加时间: %s (%.0f分钟前)",
+			entry.AddedAt.Format("15:04:05"),
+			time.Since(entry.AddedAt).Minutes())
+
+		// 构建分析上下文（只包含这个币种）
+		ctx, err := at.buildWatchlistAnalysisContext(entry)
+		if err != nil {
+			log.Printf("   ❌ 构建分析上下文失败: %v", err)
+			continue
+		}
+
+		// 调用AI分析
+		decision, err := decision.GetFullDecisionWithCustomPrompt(ctx, at.mcpClient, at.customPrompt, at.overrideBasePrompt, at.systemPromptTemplate)
+		if err != nil {
+			log.Printf("   ❌ AI分析失败: %v", err)
+			continue
+		}
+
+		// 处理AI决策
+		at.processWatchlistDecision(entry, decision)
+
+		analyzedCount++
+
+		// 检查是否还有可用槽位
+		if analyzedCount >= availableSlots {
+			log.Printf("\n⚠️  已分析%d个币种（可用槽位已满），剩余%d个待下次分析",
+				analyzedCount, len(entries)-analyzedCount)
+			break
+		}
+	}
+
+	log.Printf(strings.Repeat("=", 70) + "\n")
+}
+
+// buildWatchlistAnalysisContext 为watchlist币种构建分析上下文
+func (at *AutoTrader) buildWatchlistAnalysisContext(entry *WatchlistEntry) (*decision.Context, error) {
+	// 获取账户信息
+	balance, err := at.trader.GetBalance()
+	if err != nil {
+		return nil, fmt.Errorf("获取账户余额失败: %w", err)
+	}
+
+	totalWalletBalance := 0.0
+	totalUnrealizedProfit := 0.0
+	availableBalance := 0.0
+
+	if wallet, ok := balance["totalWalletBalance"].(float64); ok {
+		totalWalletBalance = wallet
+	}
+	if unrealized, ok := balance["totalUnrealizedProfit"].(float64); ok {
+		totalUnrealizedProfit = unrealized
+	}
+	if avail, ok := balance["availableBalance"].(float64); ok {
+		availableBalance = avail
+	}
+
+	totalEquity := totalWalletBalance + totalUnrealizedProfit
+
+	// 创建候选币种列表（只包含这一个币种）
+	candidateCoins := []decision.CandidateCoin{
+		{
+			Symbol:  entry.Symbol,
+			Sources: entry.Sources,
+		},
+	}
+
+	// 获取Screener数据（如果有）
+	var screenerDataMap map[string]*decision.ScreenerData
+	if entry.ScreenerTotalSignals > 0 {
+		screenerDataMap = make(map[string]*decision.ScreenerData)
+		screenerDataMap[entry.Symbol] = &decision.ScreenerData{
+			TotalSignals:  entry.ScreenerTotalSignals,
+			SCCount:       entry.ScreenerSCCount,
+			TSBinance:     entry.ScreenerTotalSignals - entry.ScreenerSCCount, // 简化
+			BTCCorr:       entry.ScreenerBTCCorr,
+			SCColor:       entry.ScreenerSCColor,
+			LastSignalAge: int(time.Since(entry.LastAnalyzedAt).Minutes()),
+		}
+	}
+
+	// 构建上下文
+	ctx := &decision.Context{
+		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
+		CallCount:        at.callCount,
+		BTCETHLeverage:   at.config.BTCETHLeverage,
+		AltcoinLeverage:  at.config.AltcoinLeverage,
+		Account: decision.AccountInfo{
+			TotalEquity:      totalEquity,
+			AvailableBalance: availableBalance,
+			PositionCount:    0, // Watchlist分析时不关心持仓数
+		},
+		Positions:       []decision.PositionInfo{}, // 空持仓列表
+		CandidateCoins:  candidateCoins,
+		ScreenerDataMap: screenerDataMap,
+	}
+
+	// 获取市场数据
+	if err := decision.FetchMarketDataForContext(ctx); err != nil {
+		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	return ctx, nil
+}
+
+// processWatchlistDecision 处理watchlist分析决策
+func (at *AutoTrader) processWatchlistDecision(entry *WatchlistEntry, fullDecision *decision.FullDecision) {
+	if fullDecision == nil || len(fullDecision.Decisions) == 0 {
+		log.Printf("   ⏸  AI决定: 继续观察")
+		return
+	}
+
+	for _, d := range fullDecision.Decisions {
+		if d.Symbol != entry.Symbol {
+			continue
+		}
+
+		log.Printf("   🤖 AI决策: %s - %s", d.Action, d.Reasoning)
+
+		switch d.Action {
+		case "open_long", "open_short":
+			// AI决定开仓 - 执行开仓并从watchlist移除
+			log.Printf("   ✅ 条件成熟，准备开仓")
+
+			// 创建action record用于记录
+			actionRecord := &logger.DecisionAction{
+				Symbol:    d.Symbol,
+				Action:    d.Action,
+				Reasoning: d.Reasoning,
+			}
+
+			// 执行开仓
+			err := at.executeDecisionWithRecord(&d, actionRecord)
+			if err != nil {
+				log.Printf("   ❌ 开仓失败: %v", err)
+			} else {
+				// 开仓成功，从watchlist移除
+				at.removeFromWatchlist(entry.Symbol, "已开仓")
+			}
+
+		case "remove_from_watchlist":
+			// AI决定移除 - 从watchlist移除
+			at.removeFromWatchlist(entry.Symbol, d.Reasoning)
+
+		case "wait", "hold":
+			// AI决定继续观察 - 不做任何操作
+			log.Printf("   ⏸  继续观察")
+
+		default:
+			log.Printf("   ⚠️  未知操作: %s", d.Action)
+		}
+	}
 }
