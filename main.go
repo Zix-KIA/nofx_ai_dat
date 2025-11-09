@@ -261,6 +261,33 @@ func main() {
 		log.Printf("✓ 已配置OI Top API")
 	}
 
+	// 初始化Screener Listener（如果启用）
+	signalSources, err := database.GetUserSignalSource("default")
+	if err == nil && signalSources.ScreenerEnabled {
+		log.Printf("🎯 初始化Screener Listener...")
+		err = pool.InitGlobalScreenerListener(signalSources.SupabaseURL, signalSources.SupabaseKey)
+		if err != nil {
+			log.Printf("⚠️  Screener Listener初始化失败: %v", err)
+		} else {
+			log.Printf("✓ Screener Listener已启动")
+
+			// 显示顶部信号对
+			listener := pool.GetGlobalScreenerListener()
+			if listener != nil {
+				topPairs := listener.GetTopSignalPairs(10)
+				if len(topPairs) > 0 {
+					log.Printf("📊 当前热门交易对 (Top 10 by signals):")
+					for i, pair := range topPairs {
+						if stats, ok := listener.GetStatistics(pair); ok {
+							log.Printf("  %d. %s: %d signals (SC:%d, BTC_corr:%.2f)",
+								i+1, pair, stats.TotalSignals, stats.SCCount, stats.BTCCorrAvg)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// 创建TraderManager
 	traderManager := manager.NewTraderManager()
 

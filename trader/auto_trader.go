@@ -75,6 +75,9 @@ type AutoTraderConfig struct {
 
 	// 系统提示词模板
 	SystemPromptTemplate string // 系统提示词模板名称（如 "default", "aggressive"）
+
+	// Screener信号配置
+	UseScreenerSignals bool // 是否使用screener实时信号
 }
 
 // AutoTrader 自动交易器
@@ -107,6 +110,11 @@ type AutoTrader struct {
 	lastBalanceSyncTime   time.Time          // 上次余额同步时间
 	database              interface{}        // 数据库引用（用于自动更新余额）
 	userID                string             // 用户ID
+
+	// Screener信号相关
+	useScreenerSignals    bool               // 是否使用screener信号
+	screenerCandidates    map[string]bool    // 来自screener的候选币种
+	screenerCandidatesMux sync.RWMutex       // 候选币种的读写锁
 }
 
 // NewAutoTrader 创建自动交易器
@@ -233,6 +241,8 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		lastBalanceSyncTime:   time.Now(), // 初始化为当前时间
 		database:              database,
 		userID:                userID,
+		useScreenerSignals:    config.UseScreenerSignals,
+		screenerCandidates:    make(map[string]bool),
 	}, nil
 }
 
@@ -243,6 +253,13 @@ func (at *AutoTrader) Run() error {
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
+
+	// 启动screener信号监听（如果启用）
+	if at.useScreenerSignals {
+		at.monitorWg.Add(1)
+		go at.watchScreenerSignals()
+		log.Printf("👂 [%s] Screener信号监听已启动", at.name)
+	}
 
 	// 启动回撤监控
 	at.startDrawdownMonitor()
@@ -273,6 +290,81 @@ func (at *AutoTrader) Stop() {
 	close(at.stopMonitorCh) // 通知监控goroutine停止
 	at.monitorWg.Wait()     // 等待监控goroutine结束
 	log.Println("⏹ 自动交易系统停止")
+}
+
+// watchScreenerSignals 监听screener实时信号
+func (at *AutoTrader) watchScreenerSignals() {
+	defer at.monitorWg.Done()
+
+	listener := pool.GetGlobalScreenerListener()
+	if listener == nil {
+		log.Printf("⚠️  [%s] Screener listener未初始化，无法监听信号", at.name)
+		return
+	}
+
+	signalChan := listener.GetSignalChannel()
+	log.Printf("👂 [%s] 开始监听screener信号...", at.name)
+
+	for {
+		select {
+		case <-at.stopMonitorCh:
+			log.Printf("⏹  [%s] Screener信号监听已停止", at.name)
+			return
+
+		case event, ok := <-signalChan:
+			if !ok {
+				log.Printf("⚠️  [%s] Screener信号通道已关闭", at.name)
+				return
+			}
+
+			// 记录新信号
+			log.Printf("🔔 [%s] 收到screener信号: %s", at.name, event.Pair)
+			log.Printf("   总信号: %d (SC:%d, TS_Binance:%d, TS_Bybit:%d, HAS_Binance:%d, HAS_Bybit:%d)",
+				event.Statistics.TotalSignals,
+				event.Statistics.SCCount,
+				event.Statistics.TSBinanceCount,
+				event.Statistics.TSBybitCount,
+				event.Statistics.HASBinanceCount,
+				event.Statistics.HASBybitCount,
+			)
+			log.Printf("   BTC相关性: %.2f (30m:%.2f, 60m:%.2f, 120m:%.2f, 180m:%.2f)",
+				event.Statistics.BTCCorrAvg,
+				event.Statistics.BTCCorr30,
+				event.Statistics.BTCCorr60,
+				event.Statistics.BTCCorr120,
+				event.Statistics.BTCCorr180,
+			)
+			log.Printf("   SC颜色: %s, 最新信号时间: %s",
+				event.Statistics.SCLastColor,
+				event.Statistics.LastSignalDatetime.Format("15:04:05"),
+			)
+
+			// 过滤条件1: 最少信号数量
+			if event.Statistics.TotalSignals < 10 {
+				log.Printf("   ⏭️  跳过: 信号数量不足 (%d < 10)", event.Statistics.TotalSignals)
+				continue
+			}
+
+			// 过滤条件2: SC颜色（只接受蓝色🟦或绿色🟢）
+			if event.Statistics.SCLastColor != "🟦" && event.Statistics.SCLastColor != "🟢" {
+				log.Printf("   ⏭️  跳过: SC颜色不符合 (%s)", event.Statistics.SCLastColor)
+				continue
+			}
+
+			// 过滤条件3: BTC相关性（避免过高正相关）
+			if event.Statistics.BTCCorrAvg > 0.7 {
+				log.Printf("   ⏭️  跳过: BTC相关性过高 (%.2f > 0.7)", event.Statistics.BTCCorrAvg)
+				continue
+			}
+
+			// 通过所有过滤条件，添加到候选列表
+			at.screenerCandidatesMux.Lock()
+			at.screenerCandidates[event.Pair] = true
+			at.screenerCandidatesMux.Unlock()
+
+			log.Printf("   ✅ [%s] 已添加 %s 到候选币种列表", at.name, event.Pair)
+		}
+	}
 }
 
 // autoSyncBalanceIfNeeded 自动同步余额（每10分钟检查一次，变化>5%才更新）
@@ -685,7 +777,43 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		performance = nil
 	}
 
-	// 6. 构建上下文
+	// 6. 获取Screener统计数据（如果启用）
+	var screenerDataMap map[string]*decision.ScreenerData
+	if at.useScreenerSignals {
+		screenerDataMap = make(map[string]*decision.ScreenerData)
+		listener := pool.GetGlobalScreenerListener()
+		if listener != nil {
+			for _, coin := range candidateCoins {
+				// 检查该币种是否来自screener
+				hasScreener := false
+				for _, source := range coin.Sources {
+					if source == "screener" {
+						hasScreener = true
+						break
+					}
+				}
+
+				if hasScreener {
+					if stats, ok := listener.GetStatistics(coin.Symbol); ok {
+						// 计算最后信号距今分钟数
+						lastSignalAge := int(time.Since(stats.LastSignalDatetime).Minutes())
+
+						screenerDataMap[coin.Symbol] = &decision.ScreenerData{
+							TotalSignals:  stats.TotalSignals,
+							SCCount:       stats.SCCount,
+							TSBinance:     stats.TSBinanceCount,
+							TSBybit:       stats.TSBybitCount,
+							BTCCorr:       stats.BTCCorrAvg,
+							SCColor:       stats.SCLastColor,
+							LastSignalAge: lastSignalAge,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 7. 构建上下文
 	ctx := &decision.Context{
 		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
 		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
@@ -701,9 +829,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:      positionInfos,
-		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析
+		Positions:       positionInfos,
+		CandidateCoins:  candidateCoins,
+		ScreenerDataMap: screenerDataMap, // 添加Screener统计数据
+		Performance:     performance,      // 添加历史表现分析
 	}
 
 	return ctx, nil
@@ -1429,10 +1558,10 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 
 // getCandidateCoins 获取交易员的候选币种列表
 func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
+	var candidateCoins []decision.CandidateCoin
+
 	if len(at.tradingCoins) == 0 {
 		// 使用数据库配置的默认币种列表
-		var candidateCoins []decision.CandidateCoin
-
 		if len(at.defaultCoins) > 0 {
 			// 使用数据库中配置的默认币种
 			for _, coin := range at.defaultCoins {
@@ -1444,7 +1573,6 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 			}
 			log.Printf("📋 [%s] 使用数据库默认币种: %d个币种 %v",
 				at.name, len(candidateCoins), at.defaultCoins)
-			return candidateCoins, nil
 		} else {
 			// 如果数据库中没有配置默认币种，则使用AI500+OI Top作为fallback
 			const ai500Limit = 20 // AI500取前20个评分最高的币种
@@ -1465,11 +1593,9 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 
 			log.Printf("📋 [%s] 数据库无默认币种配置，使用AI500+OI Top: AI500前%d + OI_Top20 = 总计%d个候选币种",
 				at.name, ai500Limit, len(candidateCoins))
-			return candidateCoins, nil
 		}
 	} else {
 		// 使用自定义币种列表
-		var candidateCoins []decision.CandidateCoin
 		for _, coin := range at.tradingCoins {
 			// 确保币种格式正确（转为大写USDT交易对）
 			symbol := normalizeSymbol(coin)
@@ -1481,8 +1607,50 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 
 		log.Printf("📋 [%s] 使用自定义币种: %d个币种 %v",
 			at.name, len(candidateCoins), at.tradingCoins)
-		return candidateCoins, nil
 	}
+
+	// 如果启用了Screener信号，将Screener候选币种合并到列表中
+	if at.useScreenerSignals {
+		at.screenerCandidatesMux.RLock()
+		screenerCount := len(at.screenerCandidates)
+		screenerPairs := make([]string, 0, screenerCount)
+		for pair := range at.screenerCandidates {
+			screenerPairs = append(screenerPairs, pair)
+		}
+		at.screenerCandidatesMux.RUnlock()
+
+		if screenerCount > 0 {
+			// 创建现有币种的映射（用于去重）
+			existingSymbols := make(map[string]int) // symbol -> index in candidateCoins
+			for i, coin := range candidateCoins {
+				existingSymbols[coin.Symbol] = i
+			}
+
+			// 合并Screener候选币种
+			addedCount := 0
+			mergedCount := 0
+			for _, pair := range screenerPairs {
+				symbol := normalizeSymbol(pair)
+				if idx, exists := existingSymbols[symbol]; exists {
+					// 币种已存在，添加"screener"到来源列表
+					candidateCoins[idx].Sources = append(candidateCoins[idx].Sources, "screener")
+					mergedCount++
+				} else {
+					// 新币种，添加到候选列表
+					candidateCoins = append(candidateCoins, decision.CandidateCoin{
+						Symbol:  symbol,
+						Sources: []string{"screener"},
+					})
+					addedCount++
+				}
+			}
+
+			log.Printf("🎯 [%s] Screener信号: 新增%d个币种，合并%d个币种 (总计%d个Screener候选)",
+				at.name, addedCount, mergedCount, screenerCount)
+		}
+	}
+
+	return candidateCoins, nil
 }
 
 // normalizeSymbol 标准化币种符号（确保以USDT结尾）

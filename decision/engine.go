@@ -65,19 +65,31 @@ type OITopData struct {
 	NetShort          float64 // 净空仓
 }
 
+// ScreenerData Screener信号统计数据（用于AI决策参考）
+type ScreenerData struct {
+	TotalSignals  int     // 总信号数
+	SCCount       int     // SC信号数
+	TSBinance     int     // TS Binance信号数
+	TSBybit       int     // TS Bybit信号数
+	BTCCorr       float64 // BTC相关性（平均）
+	SCColor       string  // SC最新颜色
+	LastSignalAge int     // 最后信号距今分钟数
+}
+
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime     string                  `json:"current_time"`
-	RuntimeMinutes  int                     `json:"runtime_minutes"`
-	CallCount       int                     `json:"call_count"`
-	Account         AccountInfo             `json:"account"`
-	Positions       []PositionInfo          `json:"positions"`
-	CandidateCoins  []CandidateCoin         `json:"candidate_coins"`
-	MarketDataMap   map[string]*market.Data `json:"-"` // 不序列化，但内部使用
-	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
-	Performance     interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
-	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	CurrentTime      string                  `json:"current_time"`
+	RuntimeMinutes   int                     `json:"runtime_minutes"`
+	CallCount        int                     `json:"call_count"`
+	Account          AccountInfo             `json:"account"`
+	Positions        []PositionInfo          `json:"positions"`
+	CandidateCoins   []CandidateCoin         `json:"candidate_coins"`
+	MarketDataMap    map[string]*market.Data `json:"-"` // 不序列化，但内部使用
+	OITopDataMap     map[string]*OITopData   `json:"-"` // OI Top数据映射
+	ScreenerDataMap  map[string]*ScreenerData `json:"-"` // Screener信号数据映射
+	Performance      interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
+	BTCETHLeverage   int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage  int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
 }
 
 // Decision AI的交易决策
@@ -399,16 +411,54 @@ func buildUserPrompt(ctx *Context) string {
 		}
 		displayedCount++
 
+		// 构建来源标签
 		sourceTags := ""
+		hasScreener := false
+		for _, source := range coin.Sources {
+			if source == "screener" {
+				hasScreener = true
+				break
+			}
+		}
+
 		if len(coin.Sources) > 1 {
-			sourceTags = " (AI500+OI_Top双重信号)"
-		} else if len(coin.Sources) == 1 && coin.Sources[0] == "oi_top" {
-			sourceTags = " (OI_Top持仓增长)"
+			if hasScreener {
+				sourceTags = " (多重信号: " + strings.Join(coin.Sources, "+") + ")"
+			} else {
+				sourceTags = " (AI500+OI_Top双重信号)"
+			}
+		} else if len(coin.Sources) == 1 {
+			switch coin.Sources[0] {
+			case "oi_top":
+				sourceTags = " (OI_Top持仓增长)"
+			case "screener":
+				sourceTags = " (Screener实时信号)"
+			case "ai500":
+				sourceTags = " (AI500推荐)"
+			case "custom":
+				sourceTags = " (自定义币种)"
+			case "default":
+				sourceTags = " (默认币种)"
+			}
 		}
 
 		// 使用FormatMarketData输出完整市场数据
 		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
 		sb.WriteString(market.Format(marketData))
+
+		// 如果有Screener数据，添加Screener统计信息
+		if hasScreener && ctx.ScreenerDataMap != nil {
+			if screenerData, ok := ctx.ScreenerDataMap[coin.Symbol]; ok {
+				sb.WriteString(fmt.Sprintf("\n**Screener信号统计:**\n"))
+				sb.WriteString(fmt.Sprintf("- 总信号: %d (SC:%d, TS_Binance:%d, TS_Bybit:%d)\n",
+					screenerData.TotalSignals, screenerData.SCCount,
+					screenerData.TSBinance, screenerData.TSBybit))
+				sb.WriteString(fmt.Sprintf("- BTC相关性: %.2f (值越低越独立)\n", screenerData.BTCCorr))
+				sb.WriteString(fmt.Sprintf("- SC颜色: %s\n", screenerData.SCColor))
+				sb.WriteString(fmt.Sprintf("- 最后信号: %d分钟前\n", screenerData.LastSignalAge))
+			}
+		}
+
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
