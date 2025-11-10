@@ -360,7 +360,7 @@ type CreateTraderRequest struct {
 	AIModelID            string  `json:"ai_model_id" binding:"required"`
 	ExchangeID           string  `json:"exchange_id" binding:"required"`
 	InitialBalance       float64 `json:"initial_balance"`
-	ScanIntervalMinutes  int     `json:"scan_interval_minutes"`
+	ScanIntervalMinutes  float64 `json:"scan_interval_minutes"`
 	BTCETHLeverage       int     `json:"btc_eth_leverage"`
 	AltcoinLeverage      int     `json:"altcoin_leverage"`
 	TradingSymbols       string  `json:"trading_symbols"`
@@ -483,10 +483,10 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		systemPromptTemplate = req.SystemPromptTemplate
 	}
 
-	// 设置扫描间隔默认值
+	// 设置扫描间隔默认值（支持0.5分钟 = 30秒，用于2次/分钟监控）
 	scanIntervalMinutes := req.ScanIntervalMinutes
-	if scanIntervalMinutes < 3 {
-		scanIntervalMinutes = 3 // 默认3分钟，且不允许小于3
+	if scanIntervalMinutes <= 0 {
+		scanIntervalMinutes = 0.5 // 默认30秒（2次/分钟）
 	}
 
 	// ✨ 查询交易所实际余额，覆盖用户输入
@@ -607,7 +607,7 @@ type UpdateTraderRequest struct {
 	AIModelID           string  `json:"ai_model_id" binding:"required"`
 	ExchangeID          string  `json:"exchange_id" binding:"required"`
 	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
+	ScanIntervalMinutes float64 `json:"scan_interval_minutes"`
 	BTCETHLeverage      int     `json:"btc_eth_leverage"`
 	AltcoinLeverage     int     `json:"altcoin_leverage"`
 	TradingSymbols      string  `json:"trading_symbols"`
@@ -663,12 +663,10 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		altcoinLeverage = existingTrader.AltcoinLeverage // 保持原值
 	}
 
-	// 设置扫描间隔，允许更新
+	// 设置扫描间隔，允许更新（支持0.5分钟 = 30秒）
 	scanIntervalMinutes := req.ScanIntervalMinutes
 	if scanIntervalMinutes <= 0 {
 		scanIntervalMinutes = existingTrader.ScanIntervalMinutes // 保持原值
-	} else if scanIntervalMinutes < 3 {
-		scanIntervalMinutes = 3
 	}
 
 	// 更新交易员配置
