@@ -268,6 +268,13 @@ func (sl *ScreenerListener) checkForNewSignals() {
 	for i := range stats {
 		stat := stats[i]
 
+		// 🔥 Binance过滤：只处理有Binance信号的交易对
+		hasBinanceSignals := stat.TSBinanceCount > 0 || stat.HASBinanceCount > 0
+		if !hasBinanceSignals {
+			// 跳过没有Binance信号的交易对（只有Bybit信号）
+			continue
+		}
+
 		// 检查是否是新信号
 		sl.statisticsMutex.RLock()
 		oldStat, exists := sl.statistics[stat.Pair]
@@ -288,8 +295,8 @@ func (sl *ScreenerListener) checkForNewSignals() {
 
 			select {
 			case sl.signalChan <- event:
-				log.Printf("🔔 新信号: %s (总计:%d, SC:%d, 相关性:%.2f)",
-					stat.Pair, stat.TotalSignals, stat.SCCount, stat.BTCCorrAvg)
+				log.Printf("🔔 新信号 [Binance]: %s (总计:%d, SC:%d, TS_Binance:%d, HAS_Binance:%d, 相关性:%.2f)",
+					stat.Pair, stat.TotalSignals, stat.SCCount, stat.TSBinanceCount, stat.HASBinanceCount, stat.BTCCorrAvg)
 			default:
 				log.Printf("⚠️  信号通道已满，丢弃信号: %s", stat.Pair)
 			}

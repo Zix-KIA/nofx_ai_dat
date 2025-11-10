@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -79,6 +80,10 @@ type AutoTraderConfig struct {
 
 	// Screener信号配置
 	UseScreenerSignals bool // 是否使用screener实时信号
+
+	// Paper Trading配置
+	PaperTradingMode bool // Paper Trading模式（虚拟交易，用于学习）
+	MaxPositions     int  // 最大持仓数量
 }
 
 // WatchlistEntry 监控列表条目
@@ -138,6 +143,11 @@ type AutoTrader struct {
 	watchlistMux          sync.RWMutex               // 监控列表读写锁
 	maxWatchlistSize      int                        // 最大监控列表大小 (默认50)
 	maxPositions          int                        // 最大持仓数量 (默认10)
+
+	// Paper Trading相关
+	paperTradingMode       bool                       // Paper Trading模式
+	virtualPositionManager *VirtualPositionManager    // 虚拟持仓管理器
+	knowledgeBase          *KnowledgeBase             // 知识库
 }
 
 // NewAutoTrader 创建自动交易器
@@ -246,6 +256,35 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		maxPositions = config.MaxPositions
 	}
 
+	// 初始化Paper Trading和Knowledge Base（如果启用）
+	var virtualPosManager *VirtualPositionManager
+	var kb *KnowledgeBase
+
+	if config.PaperTradingMode {
+		// 获取数据库连接
+		var sqlDB *sql.DB
+		if dbConn, ok := database.(interface{ GetDB() *sql.DB }); ok {
+			sqlDB = dbConn.GetDB()
+		}
+
+		if sqlDB != nil {
+			// 创建Knowledge Base
+			var err error
+			kb, err = NewKnowledgeBase(sqlDB, config.ID)
+			if err != nil {
+				log.Printf("⚠️  创建Knowledge Base失败: %v", err)
+			} else {
+				log.Printf("✓ [%s] Knowledge Base已初始化", config.Name)
+			}
+
+			// 创建Virtual Position Manager
+			virtualPosManager = NewVirtualPositionManager(config.ID, config.InitialBalance, kb)
+			log.Printf("✓ [%s] Paper Trading模式已启用 (初始余额: %.2f USDT)", config.Name, config.InitialBalance)
+		} else {
+			log.Printf("⚠️  无法获取数据库连接，Paper Trading功能不可用")
+		}
+	}
+
 	return &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
@@ -278,6 +317,10 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		watchlistMux:     sync.RWMutex{},
 		maxWatchlistSize: maxWatchlistSize,
 		maxPositions:     maxPositions,
+		// Paper Trading初始化
+		paperTradingMode:       config.PaperTradingMode,
+		virtualPositionManager: virtualPosManager,
+		knowledgeBase:          kb,
 	}, nil
 }
 
