@@ -517,12 +517,12 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		switch req.ExchangeID {
 		case "binance":
 			tempTrader = trader.NewFuturesTrader(exchangeCfg.APIKey, exchangeCfg.SecretKey)
-		case "hyperliquid":
-			tempTrader, createErr = trader.NewHyperliquidTrader(
-				exchangeCfg.APIKey, // private key
-				exchangeCfg.HyperliquidWalletAddr,
-				exchangeCfg.Testnet,
-			)
+		// case "hyperliquid": // TEMPORARILY DISABLED - requires Go 1.25.0
+		// 	tempTrader, createErr = trader.NewHyperliquidTrader(
+		// 		exchangeCfg.APIKey, // private key
+		// 		exchangeCfg.HyperliquidWalletAddr,
+		// 		exchangeCfg.Testnet,
+		// 	)
 		case "aster":
 			tempTrader, createErr = trader.NewAsterTrader(
 				exchangeCfg.AsterUser,
@@ -876,12 +876,12 @@ func (s *Server) handleSyncBalance(c *gin.Context) {
 	switch traderConfig.ExchangeID {
 	case "binance":
 		tempTrader = trader.NewFuturesTrader(exchangeCfg.APIKey, exchangeCfg.SecretKey)
-	case "hyperliquid":
-		tempTrader, createErr = trader.NewHyperliquidTrader(
-			exchangeCfg.APIKey,
-			exchangeCfg.HyperliquidWalletAddr,
-			exchangeCfg.Testnet,
-		)
+	// case "hyperliquid": // TEMPORARILY DISABLED - requires Go 1.25.0
+	// 	tempTrader, createErr = trader.NewHyperliquidTrader(
+	// 		exchangeCfg.APIKey,
+	// 		exchangeCfg.HyperliquidWalletAddr,
+	// 		exchangeCfg.Testnet,
+	// 	)
 	case "aster":
 		tempTrader, createErr = trader.NewAsterTrader(
 			exchangeCfg.AsterUser,

@@ -217,12 +217,12 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 	case "binance":
 		log.Printf("🏦 [%s] 使用币安合约交易", config.Name)
 		trader = NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey)
-	case "hyperliquid":
-		log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
-		trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidWalletAddr, config.HyperliquidTestnet)
-		if err != nil {
-			return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
-		}
+	// case "hyperliquid": // TEMPORARILY DISABLED - requires Go 1.25.0
+	// 	log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
+	// 	trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidWalletAddr, config.HyperliquidTestnet)
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
+	// 	}
 	case "aster":
 		log.Printf("🏦 [%s] 使用Aster交易", config.Name)
 		trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)

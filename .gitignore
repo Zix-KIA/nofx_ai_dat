@@ -46,4 +46,4 @@ web/.vite/
 eslint-*.json
 
 # VS code
-.vscode
+.vscodenofx_trader
