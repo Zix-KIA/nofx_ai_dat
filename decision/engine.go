@@ -90,6 +90,7 @@ type Context struct {
 	Performance      interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
 	BTCETHLeverage   int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
 	AltcoinLeverage  int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	KnowledgeBaseSummary string              `json:"-"` // Knowledge Base学习摘要（Paper Trading模式）
 }
 
 // Decision AI的交易决策
@@ -483,6 +484,13 @@ func buildUserPrompt(ctx *Context) string {
 				sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
 			}
 		}
+	}
+
+	// Knowledge Base学习摘要（Paper Trading模式）
+	if ctx.KnowledgeBaseSummary != "" {
+		sb.WriteString("## 📚 Knowledge Base学习摘要\n\n")
+		sb.WriteString(ctx.KnowledgeBaseSummary)
+		sb.WriteString("\n\n")
 	}
 
 	sb.WriteString("---\n\n")

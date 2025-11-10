@@ -343,6 +343,13 @@ func (at *AutoTrader) Run() error {
 	at.monitorWg.Add(1)
 	go at.watchlistMonitor()
 
+	// 启动Paper Trading监控（如果启用）
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		at.monitorWg.Add(1)
+		go at.paperTradingMonitor()
+		log.Printf("📝 [%s] Paper Trading监控已启动", at.name)
+	}
+
 	// 启动回撤监控
 	at.startDrawdownMonitor()
 
@@ -680,6 +687,11 @@ func (at *AutoTrader) buildSingleCoinAnalysisContext(symbol string, stats *pool.
 	// 获取市场数据
 	if err := decision.FetchMarketDataForContext(ctx); err != nil {
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	// 添加Knowledge Base学习摘要（Paper Trading模式）
+	if at.knowledgeBase != nil {
+		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
 	}
 
 	return ctx, nil
@@ -1153,6 +1165,16 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		Performance:     performance,      // 添加历史表现分析
 	}
 
+	// 获取市场数据（包括BTC/ETH/候选币种等）
+	if err := decision.FetchMarketDataForContext(ctx); err != nil {
+		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	// 添加Knowledge Base学习摘要（Paper Trading模式）
+	if at.knowledgeBase != nil {
+		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
+	}
+
 	return ctx, nil
 }
 
@@ -1189,6 +1211,12 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📈 开多仓: %s", decision.Symbol)
 
+	// Paper Trading模式
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeOpenLongPaperTrading(decision, actionRecord)
+	}
+
+	// 真实交易模式
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
 	positions, err := at.trader.GetPositions()
 	if err == nil {
@@ -1265,10 +1293,68 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	return nil
 }
 
+// executeOpenLongPaperTrading Paper Trading开多仓
+func (at *AutoTrader) executeOpenLongPaperTrading(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	// 检查是否已有同币种持仓
+	if _, exists := at.virtualPositionManager.GetPositionBySymbol(decision.Symbol); exists {
+		return fmt.Errorf("❌ %s 已有虚拟持仓", decision.Symbol)
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// 获取screener数据
+	screenerData := make(map[string]interface{})
+	listener := pool.GetGlobalScreenerListener()
+	if listener != nil {
+		if stats, ok := listener.GetStatistics(decision.Symbol); ok {
+			screenerData["total_signals"] = stats.TotalSignals
+			screenerData["sc_color"] = stats.SCLastColor
+			screenerData["btc_corr"] = stats.BTCCorrAvg
+		}
+	}
+
+	// 开虚拟仓位
+	virtualPos, err := at.virtualPositionManager.OpenVirtualPosition(
+		decision.Symbol,
+		"long",
+		marketData.CurrentPrice,
+		decision.PositionSizeUSD,
+		decision.Leverage,
+		decision.StopLoss,
+		decision.TakeProfit,
+		decision.Reasoning,
+		decision.Confidence,
+		screenerData,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// 记录到actionRecord
+	actionRecord.Quantity = virtualPos.Quantity
+	actionRecord.Price = virtualPos.EntryPrice
+
+	log.Printf("  ✓ [Paper Trading] 开多仓成功: %s, 价格%.4f, 数量%.4f, 杠杆%dx",
+		decision.Symbol, virtualPos.EntryPrice, virtualPos.Quantity, virtualPos.Leverage)
+
+	return nil
+}
+
 // executeOpenShortWithRecord 执行开空仓并记录详细信息
 func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📉 开空仓: %s", decision.Symbol)
 
+	// Paper Trading模式
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeOpenShortPaperTrading(decision, actionRecord)
+	}
+
+	// 真实交易模式
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
 	positions, err := at.trader.GetPositions()
 	if err == nil {
@@ -1345,10 +1431,68 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	return nil
 }
 
+// executeOpenShortPaperTrading Paper Trading开空仓
+func (at *AutoTrader) executeOpenShortPaperTrading(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	// 检查是否已有同币种持仓
+	if _, exists := at.virtualPositionManager.GetPositionBySymbol(decision.Symbol); exists {
+		return fmt.Errorf("❌ %s 已有虚拟持仓", decision.Symbol)
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// 获取screener数据
+	screenerData := make(map[string]interface{})
+	listener := pool.GetGlobalScreenerListener()
+	if listener != nil {
+		if stats, ok := listener.GetStatistics(decision.Symbol); ok {
+			screenerData["total_signals"] = stats.TotalSignals
+			screenerData["sc_color"] = stats.SCLastColor
+			screenerData["btc_corr"] = stats.BTCCorrAvg
+		}
+	}
+
+	// 开虚拟仓位
+	virtualPos, err := at.virtualPositionManager.OpenVirtualPosition(
+		decision.Symbol,
+		"short",
+		marketData.CurrentPrice,
+		decision.PositionSizeUSD,
+		decision.Leverage,
+		decision.StopLoss,
+		decision.TakeProfit,
+		decision.Reasoning,
+		decision.Confidence,
+		screenerData,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// 记录到actionRecord
+	actionRecord.Quantity = virtualPos.Quantity
+	actionRecord.Price = virtualPos.EntryPrice
+
+	log.Printf("  ✓ [Paper Trading] 开空仓成功: %s, 价格%.4f, 数量%.4f, 杠杆%dx",
+		decision.Symbol, virtualPos.EntryPrice, virtualPos.Quantity, virtualPos.Leverage)
+
+	return nil
+}
+
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
 func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🔄 平多仓: %s", decision.Symbol)
 
+	// Paper Trading模式
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeClosePaperTrading(decision.Symbol, "AI决定平仓", actionRecord)
+	}
+
+	// 真实交易模式
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
 	if err != nil {
@@ -1375,6 +1519,12 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🔄 平空仓: %s", decision.Symbol)
 
+	// Paper Trading模式
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeClosePaperTrading(decision.Symbol, "AI决定平仓", actionRecord)
+	}
+
+	// 真实交易模式
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
 	if err != nil {
@@ -1397,9 +1547,104 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	return nil
 }
 
+// executeClosePaperTrading Paper Trading平仓（统一方法）
+func (at *AutoTrader) executeClosePaperTrading(symbol, closeReason string, actionRecord *logger.DecisionAction) error {
+	// 获取虚拟持仓
+	virtualPos, exists := at.virtualPositionManager.GetPositionBySymbol(symbol)
+	if !exists {
+		return fmt.Errorf("❌ 虚拟持仓不存在: %s", symbol)
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(symbol)
+	if err != nil {
+		return err
+	}
+
+	// 平仓
+	err = at.virtualPositionManager.CloseVirtualPosition(virtualPos.ID, marketData.CurrentPrice, closeReason)
+	if err != nil {
+		return err
+	}
+
+	actionRecord.Price = marketData.CurrentPrice
+
+	log.Printf("  ✓ [Paper Trading] 平仓成功")
+	return nil
+}
+
+// executeUpdateStopLossPaperTrading Paper Trading调整止损
+func (at *AutoTrader) executeUpdateStopLossPaperTrading(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	// 获取虚拟持仓
+	virtualPos, exists := at.virtualPositionManager.GetPositionBySymbol(decision.Symbol)
+	if !exists {
+		return fmt.Errorf("❌ 虚拟持仓不存在: %s", decision.Symbol)
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 验证新止损价格合理性
+	if virtualPos.Side == "long" && decision.NewStopLoss >= marketData.CurrentPrice {
+		return fmt.Errorf("多单止损必须低于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
+	}
+	if virtualPos.Side == "short" && decision.NewStopLoss <= marketData.CurrentPrice {
+		return fmt.Errorf("空单止损必须高于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
+	}
+
+	// 更新止损价格
+	oldStopLoss := virtualPos.StopLoss
+	virtualPos.StopLoss = decision.NewStopLoss
+
+	log.Printf("  ✓ [Paper Trading] 止损已调整: %.2f → %.2f (当前价格: %.2f)",
+		oldStopLoss, decision.NewStopLoss, marketData.CurrentPrice)
+	return nil
+}
+
+// executeUpdateTakeProfitPaperTrading Paper Trading调整止盈
+func (at *AutoTrader) executeUpdateTakeProfitPaperTrading(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	// 获取虚拟持仓
+	virtualPos, exists := at.virtualPositionManager.GetPositionBySymbol(decision.Symbol)
+	if !exists {
+		return fmt.Errorf("❌ 虚拟持仓不存在: %s", decision.Symbol)
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 验证新止盈价格合理性
+	if virtualPos.Side == "long" && decision.NewTakeProfit <= marketData.CurrentPrice {
+		return fmt.Errorf("多单止盈必须高于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, decision.NewTakeProfit)
+	}
+	if virtualPos.Side == "short" && decision.NewTakeProfit >= marketData.CurrentPrice {
+		return fmt.Errorf("空单止盈必须低于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, decision.NewTakeProfit)
+	}
+
+	// 更新止盈价格
+	oldTakeProfit := virtualPos.TakeProfit
+	virtualPos.TakeProfit = decision.NewTakeProfit
+
+	log.Printf("  ✓ [Paper Trading] 止盈已调整: %.2f → %.2f (当前价格: %.2f)",
+		oldTakeProfit, decision.NewTakeProfit, marketData.CurrentPrice)
+	return nil
+}
+
 // executeUpdateStopLossWithRecord 执行调整止损并记录详细信息
 func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🎯 调整止损: %s → %.2f", decision.Symbol, decision.NewStopLoss)
+
+	// 🔄 Paper Trading Mode
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeUpdateStopLossPaperTrading(decision, actionRecord)
+	}
 
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
@@ -1485,6 +1730,11 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  🎯 调整止盈: %s → %.2f", decision.Symbol, decision.NewTakeProfit)
 
+	// 🔄 Paper Trading Mode
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return at.executeUpdateTakeProfitPaperTrading(decision, actionRecord)
+	}
+
 	// 获取当前价格
 	marketData, err := market.Get(decision.Symbol)
 	if err != nil {
@@ -1568,6 +1818,11 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 // executePartialCloseWithRecord 执行部分平仓并记录详细信息
 func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📊 部分平仓: %s %.1f%%", decision.Symbol, decision.ClosePercentage)
+
+	// 🔄 Paper Trading Mode - 不支持部分平仓
+	if at.paperTradingMode && at.virtualPositionManager != nil {
+		return fmt.Errorf("❌ Paper Trading模式不支持部分平仓，请使用完全平仓（close_long/close_short）")
+	}
 
 	// 验证百分比范围
 	if decision.ClosePercentage <= 0 || decision.ClosePercentage > 100 {
@@ -2335,6 +2590,41 @@ func (at *AutoTrader) watchlistMonitor() {
 	}
 }
 
+// paperTradingMonitor 监控Paper Trading虚拟持仓（检查止损止盈触发）
+func (at *AutoTrader) paperTradingMonitor() {
+	defer at.monitorWg.Done()
+
+	ticker := time.NewTicker(30 * time.Second) // 每30秒检查一次（与持仓监控频率一致）
+	defer ticker.Stop()
+
+	log.Printf("📝 [%s] Paper Trading监控已启动（每30秒检查止损止盈）", at.name)
+
+	for {
+		select {
+		case <-at.stopMonitorCh:
+			log.Printf("⏹  [%s] Paper Trading监控已停止", at.name)
+			return
+
+		case <-ticker.C:
+			// 更新所有开仓的未实现盈亏，并检查止损止盈触发
+			if err := at.virtualPositionManager.UpdateUnrealizedPnL(); err != nil {
+				log.Printf("❌ [Paper Trading] 更新未实现盈亏失败: %v", err)
+			}
+
+			// 定期输出统计信息（每5分钟）
+			openPositions := at.virtualPositionManager.GetOpenPositions()
+			if len(openPositions) > 0 {
+				stats := at.virtualPositionManager.GetStatistics()
+				log.Printf("📊 [Paper Trading] 开仓: %d | 余额: %.2f USDT | 权益: %.2f USDT | 总收益: %+.2f%%",
+					len(openPositions),
+					stats["current_balance"].(float64),
+					stats["total_equity"].(float64),
+					stats["total_return"].(float64))
+			}
+		}
+	}
+}
+
 // analyzeWatchlist 分析watchlist中的所有币种
 func (at *AutoTrader) analyzeWatchlist() {
 	entries := at.getWatchlistEntries()
@@ -2480,6 +2770,11 @@ func (at *AutoTrader) buildWatchlistAnalysisContext(entry *WatchlistEntry) (*dec
 	// 获取市场数据
 	if err := decision.FetchMarketDataForContext(ctx); err != nil {
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	// 添加Knowledge Base学习摘要（Paper Trading模式）
+	if at.knowledgeBase != nil {
+		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
 	}
 
 	return ctx, nil
