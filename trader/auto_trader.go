@@ -577,7 +577,6 @@ func (at *AutoTrader) analyzeNewSignalRealtime(event *pool.ScreenerSignalEvent) 
 			actionRecord := &logger.DecisionAction{
 				Symbol:    d.Symbol,
 				Action:    d.Action,
-				Reasoning: d.Reasoning,
 			}
 
 			err := at.executeDecisionWithRecord(&d, actionRecord)
@@ -691,7 +690,10 @@ func (at *AutoTrader) buildSingleCoinAnalysisContext(symbol string, stats *pool.
 
 	// 添加Knowledge Base学习摘要（Paper Trading模式）
 	if at.knowledgeBase != nil {
-		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
+		summary, err := at.knowledgeBase.GetKnowledgeBaseSummary()
+		if err == nil {
+			ctx.KnowledgeBaseSummary = summary
+		}
 	}
 
 	return ctx, nil
@@ -1172,7 +1174,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 	// 添加Knowledge Base学习摘要（Paper Trading模式）
 	if at.knowledgeBase != nil {
-		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
+		summary, err := at.knowledgeBase.GetKnowledgeBaseSummary()
+		if err == nil {
+			ctx.KnowledgeBaseSummary = summary
+		}
 	}
 
 	return ctx, nil
@@ -1892,11 +1897,11 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 }
 
 // executeAddToWatchlistWithRecord 添加到监控列表并记录
-func (at *AutoTrader) executeAddToWatchlistWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  📝 添加到Watchlist: %s (优先级:%d)", decision.Symbol, decision.Priority)
+func (at *AutoTrader) executeAddToWatchlistWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📝 添加到Watchlist: %s (优先级:%d)", d.Symbol, d.Priority)
 
 	// 默认优先级为5
-	priority := decision.Priority
+	priority := d.Priority
 	if priority <= 0 {
 		priority = 5
 	}
@@ -1911,7 +1916,7 @@ func (at *AutoTrader) executeAddToWatchlistWithRecord(decision *decision.Decisio
 	var screenerData *decision.ScreenerData
 	listener := pool.GetGlobalScreenerListener()
 	if listener != nil {
-		if stats, ok := listener.GetStatistics(decision.Symbol); ok {
+		if stats, ok := listener.GetStatistics(d.Symbol); ok {
 			lastSignalAge := int(time.Since(stats.LastSignalDatetime).Minutes())
 			screenerData = &decision.ScreenerData{
 				TotalSignals:  stats.TotalSignals,
@@ -1927,7 +1932,7 @@ func (at *AutoTrader) executeAddToWatchlistWithRecord(decision *decision.Decisio
 	}
 
 	// 添加到watchlist
-	err := at.addToWatchlist(decision.Symbol, decision.Reasoning, priority, sources, screenerData)
+	err := at.addToWatchlist(d.Symbol, d.Reasoning, priority, sources, screenerData)
 	if err != nil {
 		return fmt.Errorf("添加到Watchlist失败: %w", err)
 	}
@@ -1936,11 +1941,11 @@ func (at *AutoTrader) executeAddToWatchlistWithRecord(decision *decision.Decisio
 }
 
 // executeRemoveFromWatchlistWithRecord 从监控列表移除并记录
-func (at *AutoTrader) executeRemoveFromWatchlistWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  📝 从Watchlist移除: %s", decision.Symbol)
+func (at *AutoTrader) executeRemoveFromWatchlistWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📝 从Watchlist移除: %s", d.Symbol)
 
 	// 从watchlist移除
-	at.removeFromWatchlist(decision.Symbol, decision.Reasoning)
+	at.removeFromWatchlist(d.Symbol, d.Reasoning)
 
 	return nil
 }
@@ -2774,7 +2779,10 @@ func (at *AutoTrader) buildWatchlistAnalysisContext(entry *WatchlistEntry) (*dec
 
 	// 添加Knowledge Base学习摘要（Paper Trading模式）
 	if at.knowledgeBase != nil {
-		ctx.KnowledgeBaseSummary = at.knowledgeBase.GetKnowledgeBaseSummary()
+		summary, err := at.knowledgeBase.GetKnowledgeBaseSummary()
+		if err == nil {
+			ctx.KnowledgeBaseSummary = summary
+		}
 	}
 
 	return ctx, nil
@@ -2803,7 +2811,6 @@ func (at *AutoTrader) processWatchlistDecision(entry *WatchlistEntry, fullDecisi
 			actionRecord := &logger.DecisionAction{
 				Symbol:    d.Symbol,
 				Action:    d.Action,
-				Reasoning: d.Reasoning,
 			}
 
 			// 执行开仓
