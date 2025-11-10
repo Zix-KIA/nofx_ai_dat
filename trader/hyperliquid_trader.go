@@ -1,6 +1,3 @@
-//go:build hyperliquid
-// +build hyperliquid
-
 package trader
 
 import (

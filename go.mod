@@ -1,6 +1,6 @@
 module nofx
 
-go 1.21
+go 1.25.0
 
 require (
 	github.com/adshao/go-binance/v2 v2.8.7
@@ -13,6 +13,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/pquerna/otp v1.4.0
 	github.com/sirupsen/logrus v1.9.3
+	github.com/sonirico/go-hyperliquid v0.17.0
 	golang.org/x/crypto v0.42.0
 	modernc.org/sqlite v1.40.0
 )
