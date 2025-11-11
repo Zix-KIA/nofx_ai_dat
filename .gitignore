@@ -46,4 +46,7 @@ web/.vite/
 eslint-*.json
 
 # VS code
-.vscodenofx_trader
+.vscode
+
+# Compiled binary
+nofx_trader
